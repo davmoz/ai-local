@@ -1,0 +1,179 @@
+#!/bin/bash
+# aictl — manage the local AI stack: Ollama + Open WebUI, published as http://ai.local
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+OLLAMA_APP="/Applications/Ollama.app"
+OLLAMA="$OLLAMA_APP/Contents/Resources/ollama"
+WEBUI_VERSION="0.11.4"
+WEBUI_PYTHON="3.12"
+AGENTS="$HOME/Library/LaunchAgents"
+LOGS="$HOME/Library/Logs/ai-local"
+LABELS=(local.ai.webui local.ai.mdns)
+UID_NUM="$(id -u)"
+PORT="${AI_LOCAL_PORT:-80}"
+
+say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+write_plist() { # label script
+  local label=$1 script=$2
+  cat > "$AGENTS/$label.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$ROOT/bin/$script</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$LOGS/$script.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/$script.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AI_LOCAL_PORT</key><string>$PORT</string>
+  </dict>
+</dict>
+</plist>
+EOF
+}
+
+agent_reload() { # label
+  launchctl bootout "gui/$UID_NUM/$1" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$1.plist"
+}
+
+install_ollama_app() { # installs/updates /Applications/Ollama.app if a newer build exists
+  local cur new tmp
+  cur=$(defaults read "$OLLAMA_APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo none)
+  tmp=$(mktemp -d)
+  say "Checking Ollama (installed: $cur)"
+  curl -fsSL -o "$tmp/o.zip" https://ollama.com/download/Ollama-darwin.zip
+  unzip -q "$tmp/o.zip" -d "$tmp"
+  new=$(defaults read "$tmp/Ollama.app/Contents/Info" CFBundleShortVersionString)
+  if [[ "$new" != "$cur" ]]; then
+    codesign --verify --deep --strict "$tmp/Ollama.app" || die "downloaded Ollama.app failed signature check"
+    say "Installing Ollama $new"
+    pkill -x Ollama || true; sleep 1
+    rm -rf "$OLLAMA_APP" && ditto "$tmp/Ollama.app" "$OLLAMA_APP"
+  else
+    say "Ollama is current ($cur)"
+  fi
+  rm -rf "$tmp"
+}
+
+ensure_ollama_running() {
+  [[ -x "$OLLAMA" ]] || install_ollama_app
+  if ! curl -fs -m 2 http://127.0.0.1:11434/api/version >/dev/null; then
+    say "Starting Ollama"
+    open -a Ollama
+    for _ in $(seq 1 30); do curl -fs -m 2 http://127.0.0.1:11434/api/version >/dev/null && return; sleep 1; done
+    die "Ollama did not start"
+  fi
+}
+
+cmd_install() {
+  command -v uv >/dev/null || die "uv is required (brew install uv)"
+  mkdir -p "$AGENTS" "$LOGS" "$HOME/.local/bin"
+  ensure_ollama_running
+
+  say "Installing Open WebUI $WEBUI_VERSION (python $WEBUI_PYTHON)"
+  uv tool install --quiet --python "$WEBUI_PYTHON" "open-webui==$WEBUI_VERSION"
+
+  say "Linking CLIs into ~/.local/bin"
+  ln -sf "$OLLAMA" "$HOME/.local/bin/ollama"
+  ln -sf "$ROOT/aictl" "$HOME/.local/bin/aictl"
+
+  say "Ollama starts at login"
+  osascript -e 'tell application "System Events" to if not (exists login item "Ollama") then make login item at end with properties {path:"/Applications/Ollama.app", hidden:true}' >/dev/null
+
+  say "Installing launch agents"
+  write_plist local.ai.webui ai-local-webui
+  write_plist local.ai.mdns  ai-local-mdns
+  for l in "${LABELS[@]}"; do agent_reload "$l"; done
+
+  cmd_models
+  say "Waiting for Open WebUI (first start takes a minute)"
+  for _ in $(seq 1 120); do curl -fs -m 2 http://127.0.0.1:$PORT/health >/dev/null && break; sleep 2; done
+  cmd_status
+}
+
+cmd_uninstall() {
+  for l in "${LABELS[@]}"; do
+    launchctl bootout "gui/$UID_NUM/$l" 2>/dev/null || true
+    rm -f "$AGENTS/$l.plist"
+  done
+  uv tool uninstall open-webui 2>/dev/null || true
+  rm -f "$HOME/.local/bin/aictl" "$HOME/.local/bin/ollama"
+  say "Removed launch agents and Open WebUI."
+  say "Kept: Ollama.app, models (~/.ollama), chat data (~/Library/Application Support/ai-local)."
+}
+
+cmd_models() {
+  ensure_ollama_running
+  local prune=${1:-}
+  local wanted; wanted=$(grep -vE '^\s*(#|$)' "$ROOT/models.txt")
+  local have; have=$("$OLLAMA" list | awk 'NR>1{print $1}')
+  for m in $wanted; do
+    if grep -qx "$m" <<<"$have"; then say "Model $m: present (checking for update)"; else say "Model $m: pulling"; fi
+    "$OLLAMA" pull "$m"
+  done
+  if [[ "$prune" == "--prune" ]]; then
+    for m in $have; do
+      grep -qx "$m" <<<"$wanted" || { say "Removing $m (not in models.txt)"; "$OLLAMA" rm "$m"; }
+    done
+  fi
+}
+
+cmd_update() {
+  install_ollama_app
+  ensure_ollama_running
+
+  local latest; latest=$(curl -fs https://pypi.org/pypi/open-webui/json | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["version"])')
+  if [[ "$latest" != "$WEBUI_VERSION" ]]; then
+    warn "Open WebUI $latest is available (pinned: $WEBUI_VERSION). Bump WEBUI_VERSION in aictl and run: aictl install"
+  fi
+  cmd_models
+}
+
+cmd_status() {
+  local v ip
+  v=$(curl -fs -m 2 http://127.0.0.1:11434/api/version | sed -E 's/.*"version":"([^"]+)".*/\1/' || true)
+  printf '%-12s %s\n' "Ollama" "${v:-DOWN}"
+  for l in "${LABELS[@]}"; do
+    if launchctl print "gui/$UID_NUM/$l" 2>/dev/null | grep -q 'state = running'; then s=running; else s=STOPPED; fi
+    printf '%-12s %s\n' "${l#local.ai.}" "$s"
+  done
+  if curl -fs -m 3 http://127.0.0.1:$PORT/health >/dev/null; then printf '%-12s %s\n' "web" "ok"; else printf '%-12s %s\n' "web" "DOWN"; fi
+  ip=$(dscacheutil -q host -a name ai.local 2>/dev/null | awk '/ip_address/{print $2; exit}')
+  printf '%-12s %s\n' "ai.local" "${ip:-unresolved}"
+  echo "Models:"; "$OLLAMA" list 2>/dev/null | sed 's/^/  /'
+}
+
+cmd_logs() { tail -n 50 -F "$LOGS"/*.log; }
+
+cmd_restart() { for l in "${LABELS[@]}"; do launchctl kickstart -k "gui/$UID_NUM/$l"; done; say "Restarted."; }
+
+case "${1:-help}" in
+  install)   cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  update)    cmd_update ;;
+  models)    shift; cmd_models "${1:-}" ;;
+  status)    cmd_status ;;
+  restart)   cmd_restart ;;
+  logs)      cmd_logs ;;
+  *) cat <<EOF
+usage: aictl <command>
+  install         install Open WebUI + launch agents, pull models, publish http://ai.local
+  update          update Ollama.app and models (warns if a newer Open WebUI exists)
+  models [--prune] pull everything in models.txt; --prune removes unlisted models
+  status          show service health, ai.local resolution and installed models
+  restart         restart Open WebUI and the mDNS publisher
+  logs            follow logs
+  uninstall       remove launch agents and Open WebUI (keeps models and chat data)
+EOF
+  ;;
+esac

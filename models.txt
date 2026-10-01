@@ -1,0 +1,3 @@
+# Models kept installed by `aictl models`. One Ollama tag per line.
+# Anything installed but not listed here is removed by `aictl models --prune`.
+qwen3.8:27b-mlx

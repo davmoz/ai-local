@@ -1,0 +1,29 @@
+#!/bin/bash
+# Runs Open WebUI against the local Ollama server. Started by launchd (local.ai.webui).
+set -euo pipefail
+
+STATE_DIR="$HOME/Library/Application Support/ai-local"
+mkdir -p "$STATE_DIR/webui"
+
+# Persist a session secret so logins survive restarts.
+SECRET_FILE="$STATE_DIR/webui-secret"
+if [[ ! -s "$SECRET_FILE" ]]; then
+  umask 077
+  openssl rand -hex 32 > "$SECRET_FILE"
+fi
+
+export DATA_DIR="$STATE_DIR/webui"
+export WEBUI_SECRET_KEY="$(cat "$SECRET_FILE")"
+PORT="${AI_LOCAL_PORT:-80}"
+[[ "$PORT" == 80 ]] && SUFFIX="" || SUFFIX=":$PORT"
+
+export WEBUI_NAME="AI"
+export WEBUI_URL="http://ai.local$SUFFIX"
+export CORS_ALLOW_ORIGIN="http://ai.local$SUFFIX;http://localhost$SUFFIX;http://127.0.0.1$SUFFIX"
+export OLLAMA_BASE_URL="http://127.0.0.1:11434"
+export ENABLE_OPENAI_API="false"
+export ANONYMIZED_TELEMETRY="false"
+export SCARF_NO_ANALYTICS="true"
+export DO_NOT_TRACK="true"
+
+exec "$HOME/.local/bin/open-webui" serve --host 0.0.0.0 --port "$PORT"

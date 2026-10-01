@@ -1,0 +1,15 @@
+# Model weights never belong in the repo (Ollama keeps them in ~/.ollama)
+*.gguf
+*.safetensors
+*.bin
+*.mlx
+models/
+.ollama/
+
+# Runtime state, secrets and logs (live outside the repo, ignored just in case)
+*.log
+webui-secret
+webui/
+.env
+
+.DS_Store

@@ -1,5 +1,9 @@
 # ai-local
 
+> **Moving to a new Mac?** [GETTING-STARTED.md](GETTING-STARTED.md) describes the exact current setup
+> (Ollama 0.40.2, Open WebUI 0.12.5 + audioop-lts, the three launch agents in [`launchd/`](launchd/),
+> backup/restore and troubleshooting).
+
 Run local LLMs on a Mac and reach them from any device on your network at **http://ai.local**.
 
 - **[Ollama](https://ollama.com)** runs the models (stays on `127.0.0.1:11434`).

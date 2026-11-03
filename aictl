@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 OLLAMA_APP="/Applications/Ollama.app"
 OLLAMA="$OLLAMA_APP/Contents/Resources/ollama"
-WEBUI_VERSION="0.11.4"
-WEBUI_PYTHON="3.12"
+WEBUI_VERSION="0.12.5"
+WEBUI_PYTHON="3.13"  # needs audioop-lts (audioop was removed in 3.13)
 AGENTS="$HOME/Library/LaunchAgents"
 LOGS="$HOME/Library/Logs/ai-local"
 LABELS=(local.ai.webui local.ai.mdns)
@@ -81,7 +81,7 @@ cmd_install() {
   ensure_ollama_running
 
   say "Installing Open WebUI $WEBUI_VERSION (python $WEBUI_PYTHON)"
-  uv tool install --quiet --python "$WEBUI_PYTHON" "open-webui==$WEBUI_VERSION"
+  uv tool install --quiet --force --python "$WEBUI_PYTHON" "open-webui==$WEBUI_VERSION" --with audioop-lts
 
   say "Linking CLIs into ~/.local/bin"
   ln -sf "$OLLAMA" "$HOME/.local/bin/ollama"
@@ -93,6 +93,7 @@ cmd_install() {
   say "Installing launch agents"
   write_plist local.ai.webui ai-local-webui
   write_plist local.ai.mdns  ai-local-mdns
+  cp "$ROOT/launchd/local.ai.ollama-env.plist" "$AGENTS/" && agent_reload local.ai.ollama-env
   for l in "${LABELS[@]}"; do agent_reload "$l"; done
 
   cmd_models
@@ -106,6 +107,7 @@ cmd_uninstall() {
     launchctl bootout "gui/$UID_NUM/$l" 2>/dev/null || true
     rm -f "$AGENTS/$l.plist"
   done
+  launchctl bootout "gui/$UID_NUM/local.ai.ollama-env" 2>/dev/null || true; rm -f "$AGENTS/local.ai.ollama-env.plist"
   uv tool uninstall open-webui 2>/dev/null || true
   rm -f "$HOME/.local/bin/aictl" "$HOME/.local/bin/ollama"
   say "Removed launch agents and Open WebUI."
@@ -134,7 +136,7 @@ cmd_update() {
 
   local latest; latest=$(curl -fs https://pypi.org/pypi/open-webui/json | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["version"])')
   if [[ "$latest" != "$WEBUI_VERSION" ]]; then
-    warn "Open WebUI $latest is available (pinned: $WEBUI_VERSION). Bump WEBUI_VERSION in aictl and run: aictl install"
+    warn "Open WebUI $latest is available (pinned: $WEBUI_VERSION). Bump WEBUI_VERSION in aictl and run: aictl install (keeps --with audioop-lts)"
   fi
   cmd_models
 }
